@@ -350,7 +350,7 @@ uvmcopy_not_physical(pagetable_t old, pagetable_t new, uint64 begin, uint64 end)
   pte_t *pte, *newPte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  // char *mem;
 
   for(i = PGROUNDDOWN(begin); i < end; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)

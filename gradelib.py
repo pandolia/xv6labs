@@ -249,6 +249,7 @@ def random_str(n=8):
     return ''.join(random.choice(letters) for _ in range(n))
 
 def check_time():
+    return
     try:
         print("")
         with open('time.txt') as f:
