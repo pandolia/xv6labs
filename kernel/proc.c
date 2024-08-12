@@ -120,6 +120,19 @@ found:
     release(&p->lock);
     return 0;
   }
+  
+  p->proc_kernel_pagetable = ukvminit();
+  if(p->proc_kernel_pagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  char *pa = kalloc();
+  if(pa == 0)
+    panic("kalloc");
+  uint64 va = KSTACK((int) (p - proc));
+  ukvmmap(p->proc_kernel_pagetable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -130,18 +143,52 @@ found:
   return p;
 }
 
-// free a proc structure and the data hanging from it,
-// including user pages.
-// p->lock must be held.
+void 
+proc_freekernelpagetable(pagetable_t pagetable){
+  for (int i = 0; i < 512; ++i) {
+    pte_t pte = pagetable[i];
+    if ((pte & PTE_V)) {
+      pagetable[i] = 0;
+      if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+        uint64 child = PTE2PA(pte);
+        proc_freekernelpagetable((pagetable_t)child);
+      }
+    } else if (pte & PTE_V) {
+      panic("proc free kernelpagetable : leaf");
+    }
+  }
+  kfree((void*)pagetable);
+}
+
+
 static void
 freeproc(struct proc *p)
 {
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+
+// 删除内核栈
+  if (p->kstack) {
+    // 通过页表地址， kstack虚拟地址 找到最后一级的页表项
+    pte_t* pte = walk(p->proc_kernel_pagetable, p->kstack, 0);
+    if (pte == 0)
+      panic("freeproc : kstack");
+    // 删除页表项对应的物理地址
+    kfree((void*)PTE2PA(*pte));
+  }
+  p->kstack = 0;
+
+
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+
+
+// 删除kernel pagetable
+  if (p->proc_kernel_pagetable) 
+    proc_freekernelpagetable(p->proc_kernel_pagetable);
+
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -151,6 +198,7 @@ freeproc(struct proc *p)
   p->xstate = 0;
   p->state = UNUSED;
 }
+
 
 // Create a user page table for a given process,
 // with no user memory, but with trampoline pages.
@@ -268,7 +316,8 @@ fork(void)
   }
 
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+    // Copy user memory from parent to child.
+  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0 || uvmcopy_not_physical(np->pagetable, np->proc_kernel_pagetable, 0, p->sz) < 0){
     freeproc(np);
     release(&np->lock);
     return -1;
@@ -473,7 +522,15 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
-        swtch(&c->context, &p->context);
+        //swtch(&c->context, &p->context);
+        
+        //在切换任务前，将用户内核页表替换到stap寄存器中
+        w_satp(MAKE_SATP(p->proc_kernel_pagetable));
+        // 清除快表缓存
+        sfence_vma();
+        swtch(&c->context, &p->context);   
+        //该进程执行结束后，将SATP寄存器的值设置为全局内核页表地址
+        kvminithart(); 
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.

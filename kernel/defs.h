@@ -180,6 +180,10 @@ int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 void vmp(pagetable_t pagetable, uint64 level);
 void vmprint(pagetable_t);
+void ukvmmap(pagetable_t kpagetable, uint64 va, uint64 pa, uint64 sz, int perm);
+pagetable_t ukvminit();
+pte_t * walk(pagetable_t pagetable, uint64 va, int alloc);
+int uvmcopy_not_physical(pagetable_t old, pagetable_t new, uint64 begin, uint64 end);
 
 
 // plic.c
@@ -225,4 +229,8 @@ void            sockclose(struct sock *);
 int             sockread(struct sock *, uint64, int);
 int             sockwrite(struct sock *, uint64, int);
 void            sockrecvudp(struct mbuf*, uint32, uint16, uint16);
+
+int copyin_new(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len);
+int copyinstr_new(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max);
+
 #endif
