@@ -49,8 +49,8 @@ usertrap(void)
   
   // save user program counter.
   p->trapframe->epc = r_sepc();
-  
-  if(r_scause() == 8){
+  uint64 scause = r_scause();
+  if(scause == 8){
     // system call
 
     if(p->killed)
@@ -65,6 +65,25 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(scause==13 || scause==15) {
+    /** 缺页中断 */
+    uint64 va = r_stval();
+
+    /** 是否为copy-on-write page fault */  
+    if(!iscow(p->pagetable, va)) 
+      goto rest;
+
+    if(!cowcopy(p->pagetable, va))
+      goto killing;      
+
+    /** 顺利结束，handle缺页中断 */
+    goto rest;
+
+  killing:
+    p->killed = 1;
+
+  rest:
+    ;
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

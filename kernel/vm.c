@@ -311,22 +311,34 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  // char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+    // pa = PTE2PA(*pte);
+    // flags = PTE_FLAGS(*pte);
+    // if((mem = kalloc()) == 0)
+    //   goto err;
+    // memmove(mem, (char*)pa, PGSIZE);
+    // if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+    //   kfree(mem);
+    //   goto err;
+    // }
+
     pa = PTE2PA(*pte);
+    /** 标记子进程和父进程不可写，这也会导致父进程失去对该PTE写入的权限 */
+    *pte &= (~PTE_W);
+    *pte |= PTE_COW;
+
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0)
       goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
-    }
+    
+    /** 告诉引用计数向量，在第(uint64)pa/PGSIZE页块处，有进程正在引用 */
+    incr_ref((char*)pa);
   }
   return 0;
 
@@ -359,6 +371,10 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
+    
+    if(iscow(pagetable, va0))
+      pa0 = cowcopy(pagetable, va0);
+
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (dstva - va0);
