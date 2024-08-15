@@ -92,29 +92,73 @@ e1000_init(uint32 *xregs)
   regs[E1000_IMS] = (1 << 7); // RXDW -- Receiver Descriptor Write Back
 }
 
+/* 中断触发，DMA 将数据交给 NIC ，待发走 */
 int
 e1000_transmit(struct mbuf *m)
 {
-  //
-  // Your code here.
   //
   // the mbuf contains an ethernet frame; program it into
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
+
+  /* m 是 in-memory 的 */
+  acquire(&e1000_lock);
+
+  uint32 idx = regs[E1000_TDT];
+
+  /* tx_ring 还未完成之前写的工作 */
+  if((tx_ring[idx].status & E1000_TXD_STAT_DD) == 0) {
+    release(&e1000_lock);
+    return -1;
+  }
+
+  /* 将之前挂载在 tx_mbufs 中的 mbuf 释放掉，即归还给 memory */
+  if(tx_mbufs[idx])
+    mbuffree(tx_mbufs[idx]);
+
+  /* 将 in-memory 的 m 挂载到 tx_ring，此 m 包含了我们需要传输的数据  */
+  tx_mbufs[idx] = m;
+  tx_ring[idx].length = m->len;   /* 为 m 填写一些 metadata*/
+  tx_ring[idx].addr = (uint64)m->head;
+  tx_ring[idx].cmd = E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP;
+
+  regs[E1000_TDT] = (idx+1)%TX_RING_SIZE;   /* 环形队列指向下一个空位，为下一次的传输操作作准备 */
+  release(&e1000_lock);
   
   return 0;
 }
 
+/* 中断触发，DMA 读取接收到的 packets ，此时的 packets 已在 memory 中 */
 static void
 e1000_recv(void)
 {
   //
-  // Your code here.
-  //
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+
+  /*  */
+  while(1) {
+    uint32 idx = (regs[E1000_RDT]+1)%RX_RING_SIZE;  /* 为刚接收的 packet 腾出空间 */
+
+    /* 当前没有需要读取的 packet */
+    if((rx_ring[idx].status & E1000_RXD_STAT_DD) == 0)
+      return;
+
+    /* 将暂存在 rx_mbufs 中的 packet 向上传递至 application */
+    rx_mbufs[idx]->len = rx_ring[idx].length;
+    net_rx(rx_mbufs[idx]);
+
+    /* 刷新 rx_ring ，为接收下一批 packets 作准备 */
+    if((rx_mbufs[idx]=mbufalloc(0)) == 0)
+      panic("e1000 _recv");
+
+    rx_ring[idx].addr = (uint64)rx_mbufs[idx]->head;      
+    rx_ring[idx].status = 0;
+
+    regs[E1000_RDT] = idx;
+  }
 }
 
 void
