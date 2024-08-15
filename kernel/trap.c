@@ -3,6 +3,10 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "fcntl.h"
+#include "file.h"
 #include "proc.h"
 #include "defs.h"
 
@@ -67,6 +71,60 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause()==13 || r_scause()==15) { /** 缺页中断 */
+    uint64 va = r_stval();
+    struct vma* vma = 0;
+
+    if(va>=p->sz || va<=p->trapframe->sp) /** va 必须在 heap 中，件 xv6 book Figure 3.4 */
+      goto killing;
+    
+    for(int i=0; i<NVMA; i++) {
+      if(va>=p->vmas[i].addr && va<p->vmas[i].addr+p->vmas[i].len) {
+        vma = &p->vmas[i];
+        break;
+      }
+    }
+
+    if(!vma)
+      goto killing;
+
+    /** 在 vm 中找到了缺页的文件对象 */
+    va = PGROUNDDOWN(va);
+    
+    /** 尝试为文件对象的 vm 分配内存，用来容乃新的内容 */
+    char* mem = kalloc();
+    if(mem == 0)
+      goto killing;
+    
+    memset(mem, 0, PGSIZE);
+    /** 将存储在 disk 中的文件对象的新内容拷贝到 vm */
+    ilock(vma->file->ip);
+    readi(vma->file->ip, 0, (uint64)mem, va-vma->addr+vma->offset, PGSIZE);
+    iunlock(vma->file->ip);
+
+    /** 根据 prot 设置 PTE 权限 */
+    int flags = PTE_U;
+    if(vma->prot & PROT_READ) 
+      flags |= PTE_R;
+    if(vma->prot & PROT_WRITE)
+      flags |= PTE_W;
+    if(vma->prot & PROT_EXEC)
+      flags |= PTE_X;
+    
+    if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, flags) != 0)
+      goto freeing;
+
+    /** 顺利结束缺页中断流程 */
+    goto rest;
+
+  freeing:
+    kfree(mem);
+
+  killing:
+    p->killed = 1;
+  
+  rest:
+    ;
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

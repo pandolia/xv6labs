@@ -301,6 +301,12 @@ fork(void)
   pid = np->pid;
 
   np->state = RUNNABLE;
+  
+  for(int i=0; i<NVMA; i++) {
+    memmove(&np->vmas[i], &p->vmas[i], sizeof(p->vmas[i]));
+    if(p->vmas[i].file)
+      filedup(p->vmas[i].file);
+  }
 
   release(&np->lock);
 
@@ -351,6 +357,10 @@ exit(int status)
       fileclose(f);
       p->ofile[fd] = 0;
     }
+  }
+  
+  for(int i=0; i<NVMA; i++) {
+    uvmunmap(p->pagetable, p->vmas[i].addr, p->vmas[i].len/PGSIZE, 1);
   }
 
   begin_op();
