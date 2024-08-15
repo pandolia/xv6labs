@@ -385,6 +385,7 @@ bmap(struct inode *ip, uint bn)
       ip->addrs[bn] = addr = balloc(ip->dev);
     return addr;
   }
+  /** 说明 bn > NDIRECT ，应该计算 block 在一级 indirect 目录中的逻辑编号 */
   bn -= NDIRECT;
 
   if(bn < NINDIRECT){
@@ -400,12 +401,42 @@ bmap(struct inode *ip, uint bn)
     brelse(bp);
     return addr;
   }
+  /** 说明 bn > NINDIRECT ，应该计算 block 在二级 indirect 目录中的逻辑编号 */
+  bn -= NINDIRECT;
 
-  panic("bmap: out of range");
+  if(bn >= NDINDIRECT) 
+    panic("bmap: out of range");
+
+  /** 把二级 indirect 目录调至 Buffer cache 中 */
+  if((addr = ip->addrs[NDIRECT+1]) == 0)
+    ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
+  bp = bread(ip->dev, addr);
+  a = (uint*)bp->data;  /** 定位到二级 indirect 目录 */
+  uint i = bn/NINDIRECT;  /** 定位到二级 indirect 目录中的第 i 条 entry */
+  bn %= NINDIRECT;  /** 第 bn 块 block */
+
+  /** 把三级的 indirect 目录调至 Buffer cache 中 */
+  if((addr = a[i]) == 0) {
+    a[i] = addr = balloc(ip->dev);
+    log_write(bp);
+  }
+  brelse(bp);
+
+  bp = bread(ip->dev, addr);
+  a = (uint*)bp->data;  /** 定位到三级 indirect 目录 */
+  if((addr = a[bn]) == 0) { /** 第 bn 块 block */
+    a[bn] = addr = balloc(ip->dev);
+    log_write(bp);
+  }
+  brelse(bp);
+  return addr;
 }
 
 // Truncate inode (discard contents).
 // Caller must hold ip->lock.
+// Truncate inode (discard contents).
+// Caller must hold ip->lock.
+/** 清空 inode 所包含的文件内容 */
 void
 itrunc(struct inode *ip)
 {
@@ -413,6 +444,7 @@ itrunc(struct inode *ip)
   struct buf *bp;
   uint *a;
 
+  /** 清空一级 indirect 目录 */
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
       bfree(ip->dev, ip->addrs[i]);
@@ -420,6 +452,7 @@ itrunc(struct inode *ip)
     }
   }
 
+  /** 清空二级 indirect 目录 */
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
@@ -432,6 +465,29 @@ itrunc(struct inode *ip)
     ip->addrs[NDIRECT] = 0;
   }
 
+  /** 清空三级 indirect 目录 */
+  if(!ip->addrs[NDIRECT+1])
+    goto truncDone;
+
+  bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+  a = (uint*)bp->data;  /** 先定位到二级 indirect 目录 */
+  for(int i=0; i<NINDIRECT; i++) {  /** 遍历二级目录中的每个非空三级 indirect 目录 */
+    if(!a[i])
+      continue;
+    
+    struct buf *bp2 = bread(ip->dev, *(a+i));
+    uint *a2 = (uint*)bp2->data;  /** 定位到非空的三级 indirect 目录 */
+    for(int j=0; j<NINDIRECT; j++) {
+      if(a2[j]) bfree(ip->dev, a2[j]);    
+    }
+    a2[j] = 0;
+    brelse(bp2);
+  }
+  brelse(bp);
+  bfree(ip->dev, ip->addrs[NDIRECT+1]);
+  ip->addrs[NDIRECT+1] = 0;
+
+truncDone:
   ip->size = 0;
   iupdate(ip);
 }

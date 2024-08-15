@@ -283,6 +283,41 @@ create(char *path, short type, short major, short minor)
   return ip;
 }
 
+static struct inode*
+symlinkroot(struct inode *ip)
+{
+  uint visted[SYMLINKDEPTH];
+  char path[MAXPATH];
+     
+  /** for-loop 之前 ip 一定持有 lock */
+  for(int i=0; i<SYMLINKDEPTH; i++) {
+    visted[i] = ip->inum;
+
+    /** 在调用 readi 之前需要持有 ip->lock */
+    if(readi(ip, 0, (uint64)path, 0, MAXPATH) <= 0) 
+      goto rootFail;
+
+    /** 寻找 symlink 的上级 inode */
+    iunlockput(ip);   /** 调用 namei 时别带 lock ，否则会 deadlock ， 因为 namei 可能会操纵 ip */ 
+    if((ip=namei(path)) == 0) 
+      return 0;
+      
+    for(int tail=i; tail>=0; tail--) {
+      if(ip->inum == visted[tail]) 
+        return 0;
+    }
+    
+    /** 没成环 */
+    ilock(ip);
+    if(ip->type != T_SYMLINK)  /** 持有 lock 返回上层 */
+      return ip;
+  }  
+
+rootFail:
+  iunlockput(ip);
+  return 0;
+}
+
 uint64
 sys_open(void)
 {
@@ -317,9 +352,18 @@ sys_open(void)
   }
 
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
-    iunlockput(ip);
+    iunlockput(ip);   
     end_op();
     return -1;
+  }
+
+  /** 符号链接业务流程 */
+  if(ip->type==T_SYMLINK && (omode & O_NOFOLLOW)==0) {
+    /** 尝试从 ip 处追根溯源 */
+    if((ip=symlinkroot(ip)) == 0) { /** 若溯源失败，则在 symlinkroot 中放锁，这是因为代码封装的局限性必须要做出的牺牲 */
+      end_op();
+      return -1;
+    }
   }
 
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
@@ -345,7 +389,7 @@ sys_open(void)
     itrunc(ip);
   }
 
-  iunlock(ip);
+  iunlock(ip);  /** 对于成功 open 的 inode ，在最后予以统一放锁  */
   end_op();
 
   return fd;
@@ -484,3 +528,37 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_symlink(void)
+{
+  struct inode *ip;
+  char target[MAXPATH], path[MAXPATH];
+
+  if(argstr(0, target, MAXPATH)<0 || argstr(1, path, MAXPATH)<0)
+    return -1;
+
+  begin_op();
+
+  /** 尝试分配一个名为 path 的 inode 作为符号链接节点 */
+  if((ip=create(path, T_SYMLINK, 0, 0)) == 0) { 
+    /** 调用 create 之后，仍持有 ip->lock ，因为 create 并没有释放 */
+    end_op();
+    return -1;
+  }
+
+  /** 将 target 文件路径名写入 ip 的第一块 block 中 */
+  if(writei(ip, 0, (uint64)target, 0, strlen(target)) < 0) {  
+    /** 调用 writei 之前需要持有 ip->lock */
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  /** 所以 writei 之后需要释放 ip->lock */ 
+  iunlockput(ip); /** iunlockput = iunlock + iput */
+
+  end_op();
+  return 0;
+}
+
